@@ -1,15 +1,14 @@
-Smart Knee Sleeve for Osteoarthritis Monitoring
-Overview
+**Overview**
 
 This repository contains the firmware and code developed for the Smart Knee Sleeve, a wearable device designed to monitor knee flexion and gait parameters in individuals with osteoarthritis (OA).
 The project was completed as part of an MEng group project at King’s College London (KCL), aiming to provide clinicians and patients with a low-cost, portable, and easy-to-use solution for assessing knee motion outside clinical environments.
 
-Project Background
+**Project Background**
 
 Osteoarthritis is a leading cause of disability worldwide, often resulting in reduced joint mobility and pain. Quantitative assessment of knee movement is vital for rehabilitation and long-term management but is typically confined to laboratory settings.
 The Smart Knee Sleeve addresses this limitation by embedding flex sensors and an inertial measurement unit (IMU) into a comfortable elastic sleeve, managed by an ESP32 microcontroller that performs real-time data acquisition and logging.
 
-Features
+**Features**
 
 Real-time monitoring of knee flexion angle
 
@@ -21,7 +20,7 @@ Automatic data logging to SD card
 
 Lightweight, unobtrusive sleeve design with minimal impact on natural movement
 
-Repository Contents
+**Repository Contents**
 
 Knee_Flexion_Angle_Code_for_Arthropodic_Knee_Microcontroller.ino
 Firmware for the ESP32-based knee sleeve, used to capture and log knee flexion angle data.
@@ -31,7 +30,7 @@ Firmware for a companion shoe module used to complement gait analysis.
 
 (Optional) Documentation such as circuit diagrams, calibration data, and analysis scripts may be added later.
 
-Hardware Requirements
+**Hardware Requirements**
 
 Microcontroller: ESP32 development board
 
@@ -47,7 +46,7 @@ Power: Rechargeable Li-Po battery (3.7 V)
 
 Wearable base: Elastic knee sleeve with integrated wiring and sensor channels
 
-Setup Instructions
+**Setup Instructions**
 
 Clone this repository:
 
@@ -68,7 +67,7 @@ Power on the device — it will begin recording automatically.
 
 Remove the SD card after testing to retrieve and analyze data.
 
-Usage
+**Usage**
 
 Wear the sleeve so that the flex sensor aligns with the knee joint.
 
@@ -78,7 +77,7 @@ Data logs can be processed in MATLAB, Python, or Excel for analysis and visualiz
 
 Wireless features of the ESP32 can later be used for live data transmission or mobile integration.
 
-Applications
+**Applications**
 
 Osteoarthritis monitoring and rehabilitation tracking
 
@@ -88,7 +87,7 @@ Biomechanical gait analysis
 
 At-home motion tracking and telehealth support
 
-Project Status
+**Project Status**
 
 Stage: Functional prototype validated with preliminary motion trials
 
