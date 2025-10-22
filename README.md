@@ -20,14 +20,13 @@ The Smart Knee Sleeve addresses this limitation by embedding **flex sensors** an
   Firmware for the ESP32-based knee sleeve, used to capture and log knee flexion angle data.  
 - `Shoe_Gait_Data_Code_for_Arthropodic_Shoe_Microcontroller.ino`  
   Firmware for a companion shoe module used to complement gait analysis.  
-- *(Optional)* Documentation such as circuit diagrams, calibration data, and analysis scripts may be added later.
 
 ## Hardware Requirements
 - **Microcontroller:** ESP32 development board  
 - **Sensors:**  
   - Flex sensor (positioned over the knee joint)  
   - IMU (e.g., MPU6050, BNO055) for angular velocity and acceleration  
-- **Storage:** SD card module for onboard data logging  
+- **Storage:** Wireless data logging
 - **Power:** Rechargeable Li-Po battery (3.7 V)  
 - **Wearable base:** Elastic knee sleeve with integrated wiring and sensor channels  
 
@@ -62,14 +61,3 @@ The Smart Knee Sleeve addresses this limitation by embedding **flex sensors** an
   - Enable Bluetooth Low Energy for real-time data streaming  
   - Implement improved calibration algorithms  
   - Develop clinician-facing visualization software  
-
-## Team
-Developed by **MEng students at King’s College London** as part of the **Applied Medical Engineering Project**.  
-The team included students from **Biomedical**, **Mechanical**, and **Electrical Engineering** disciplines.
-
-## License
-This project is released under the MIT License.  
-```
-MIT License  
-© 2025 Kenton Leung and Contributors
-```
