@@ -5,150 +5,136 @@
 #include <WiFi.h>
 #include <PubSubClient.h>
 
-// ================== WiFi Credentials ==================
-const char* ssid        = "vodafoneA54964";
-const char* password    = "xGJ9NykgCKxqTZGC";
-
-// ================== MQTT Configuration ==================
-const char* mqtt_server   = "116.203.53.123";  // e.g. your broker
+// ================== Credentials & Config ==================
+const char* ssid          = "MyHotspot";
+const char* password      = "MyHotspot316";
+const char* mqtt_server   = "116.203.53.123";
 const int   mqtt_port     = 1883;
 const char* mqtt_user     = "m.ijaz1";
 const char* mqtt_password = "NodeRedUdemyCourse#123";
+const char* topic         = "knee_flexion_data";
 
-// MQTT Topic for knee flexion data
-const char* topic = "knee_flexion_data";
+const int ONBOARD_LED      = 2;   // Built-in LED for Safety Alert
+const int DANGER_THRESHOLD  = 120;  // Medical Flexion > 120° triggers alert， 
+//prevents user from doing tasks that bends the knee too much, such as tying shoe lace or squatting.
 
-// ESP32 WiFi/MQTT client
+// ================== Objects & RTOS Handles ==================
 WiFiClient espClient;
 PubSubClient client(espClient);
-
-// ================ BNO055 Sensors =================
-// Thigh sensor at address 0x28 (ADR pin unconnected)
-// Shin sensor at address 0x29 (ADR pin tied to 3.3V)
 Adafruit_BNO055 bnoThigh = Adafruit_BNO055(55, 0x28);
 Adafruit_BNO055 bnoShin  = Adafruit_BNO055(56, 0x29);
 
-// We'll use the ROLL component (the 'y' from Euler angles).
-// baselineThighRoll is set during calibration (when the leg is extended).
-float baselineThighRoll = 0.0;
-bool calibrated = false;
+QueueHandle_t dataQueue;     // To Communication Task
+QueueHandle_t alertQueue;    // To Safety Task
+float angleOffset = 0.0;     // Stores the "Zero" point
 
-// --------------------------------------------------------------------------
-// WiFi & MQTT Routines
-// --------------------------------------------------------------------------
-void setupWiFi() {
-  Serial.print("Connecting to WiFi...");
-  WiFi.begin(ssid, password);
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
+// ================== Task 1: Medical Sensor Logic (Core 1) ==================
+void TaskSensors(void *pvParameters) {
+  for (;;) {
+    // Read Euler angles (Roll/Y-axis)
+    imu::Vector<3> t = bnoThigh.getVector(Adafruit_BNO055::VECTOR_EULER);
+    imu::Vector<3> s = bnoShin.getVector(Adafruit_BNO055::VECTOR_EULER);
+
+    // MEDICAL CALCULATION:
+    // 1. Calculate the raw relative difference
+    float currentDiff = t.y() - s.y();
+    
+    // 2. Subtract the standing offset to force 0° at extension
+    float medicalFlexion = fabs(currentDiff - angleOffset);
+
+    // 3. Handle 360-degree orientation wrap-around
+    if (medicalFlexion > 180) medicalFlexion = 360 - medicalFlexion;
+
+    // 4. Constrain to human physiological limits (0 to 140 degrees)
+    medicalFlexion = constrain(medicalFlexion, 0, 140);
+    int finalAngle = round(medicalFlexion);
+
+    // Send copies to both queues
+    xQueueSend(dataQueue, &finalAngle, 0);
+    xQueueSend(alertQueue, &finalAngle, 0);
+
+    vTaskDelay(pdMS_TO_TICKS(20)); // High-speed 50Hz sampling
   }
-  Serial.println(" connected!");
 }
 
-void reconnectMQTT() {
-  while (!client.connected()) {
-    Serial.print("Connecting to MQTT...");
-    if (client.connect("ESP32KneeFlexionClient", mqtt_user, mqtt_password)) {
-      Serial.println(" connected");
-    } else {
-      Serial.print(" failed, rc=");
-      Serial.print(client.state());
-      Serial.println(" retrying in 5 seconds");
-      delay(5000);
+// ================== Task 2: Safety Monitor (Core 1) ==================
+void TaskSafetyAlert(void *pvParameters) {
+  pinMode(ONBOARD_LED, OUTPUT);
+  int currentAngle = 0;
+
+  for (;;) {
+    // Wait for a new reading from the sensors
+    if (xQueueReceive(alertQueue, &currentAngle, portMAX_DELAY)) {
+      if (currentAngle >= DANGER_THRESHOLD) {
+        // Medical danger: Rapid Blink
+        digitalWrite(ONBOARD_LED, HIGH);
+        vTaskDelay(pdMS_TO_TICKS(100));
+        digitalWrite(ONBOARD_LED, LOW);
+        vTaskDelay(pdMS_TO_TICKS(100));
+      } else {
+        digitalWrite(ONBOARD_LED, LOW);
+      }
     }
   }
 }
 
-// --------------------------------------------------------------------------
-// Setup
-// --------------------------------------------------------------------------
-void setup() {
-  // IMPORTANT:
-  // For battery-powered operation, ensure that your battery switch fully cuts power.
-  // Each time power is applied, setup() will run and the sensors will be recalibrated.
-  
-  Serial.begin(115200);
-  Serial.println("Starting Knee Flexion Measurement Setup...");
+// ================== Task 3: MQTT / IoT Gateway (Core 0) ==================
+void TaskCommunication(void *pvParameters) {
+  for (;;) {
+    // Handle WiFi/MQTT connectivity in the background
+    if (WiFi.status() != WL_CONNECTED) {
+        WiFi.begin(ssid, password);
+        vTaskDelay(pdMS_TO_TICKS(2000));
+    } else if (!client.connected()) {
+        client.connect("ESP32KneeMedicalClient", mqtt_user, mqtt_password);
+    }
 
-  // Initialize I2C on ESP32 default pins: SDA=21, SCL=22
-  Wire.begin(21, 22);
-
-  // Initialize the thigh sensor.
-  if (!bnoThigh.begin()) {
-    Serial.println("Error: Thigh sensor (0x28) not detected! Check wiring.");
-    while (1) { delay(10); }
-  } else {
-    Serial.println("Thigh sensor detected.");
+    int angleToSend;
+    // Check for data to publish
+    if (xQueueReceive(dataQueue, &angleToSend, 0) == pdPASS) {
+        if (client.connected()) {
+            String payload = "{ \"knee_flexion_angle\": " + String(angleToSend) + " }";
+            client.publish(topic, payload.c_str());
+        }
+    }
+    client.loop();
+    vTaskDelay(pdMS_TO_TICKS(10)); // Yield to system
   }
-
-  // Initialize the shin sensor.
-  if (!bnoShin.begin()) {
-    Serial.println("Error: Shin sensor (0x29) not detected! Check wiring.");
-    while (1) { delay(10); }
-  } else {
-    Serial.println("Shin sensor detected.");
-  }
-
-  // Allow sensors to stabilize.
-  delay(1000);
-
-  Serial.println("Calibration: Hold your leg straight for 5 seconds...");
-  delay(5000);  // Wait 5 seconds while the leg is extended
-
-  // Capture the baseline roll from the thigh sensor (the 'y' in Euler angles).
-  imu::Vector<3> eulerThigh = bnoThigh.getVector(Adafruit_BNO055::VECTOR_EULER);
-  baselineThighRoll = eulerThigh.y(); // Using the roll component
-  calibrated = true;
-  
-  Serial.print("Baseline Thigh Roll: ");
-  Serial.println(baselineThighRoll);
-  Serial.println("Calibration complete. Now measuring knee flexion angle...");
-
-  // Setup WiFi and MQTT
-  WiFi.mode(WIFI_STA);
-  WiFi.disconnect(true);
-  setupWiFi();
-  client.setServer(mqtt_server, mqtt_port);
 }
 
-// --------------------------------------------------------------------------
-// Main Loop
-// --------------------------------------------------------------------------
-void loop() {
-  if (!calibrated) return;
-
-  // Ensure MQTT is connected
-  if (!client.connected()) {
-    reconnectMQTT();
+// ================== Setup (Orchestrator) ==================
+void setup() {
+  Serial.begin(115200);
+  Wire.begin(21, 22);
+  
+  if (!bnoThigh.begin() || !bnoShin.begin()) {
+    Serial.println("Critical Error: IMU not found!");
+    while (1);
   }
-  client.loop();
 
-  // Get the current Euler angles from the shin sensor (roll = 'y')
-  imu::Vector<3> eulerShin = bnoShin.getVector(Adafruit_BNO055::VECTOR_EULER);
-  float currentShinRoll = eulerShin.y();
+  // MEDICAL ZEROING:
+  // Ask user to stand with a perfectly straight leg (0° Extension)
+  Serial.println("MEDICAL CALIBRATION: Stand perfectly straight...");
+  delay(4000); 
+  
+  // Capture the difference between sensors in a neutral state
+  imu::Vector<3> t_start = bnoThigh.getVector(Adafruit_BNO055::VECTOR_EULER);
+  imu::Vector<3> s_start = bnoShin.getVector(Adafruit_BNO055::VECTOR_EULER);
+  angleOffset = t_start.y() - s_start.y();
 
-  // Calculate knee flexion angle as the absolute difference between
-  // the shin sensor's roll and the baseline thigh roll.
-  //   - 0° when extended (roll values nearly equal)
-  //   - ~90° when the segments are perpendicular.
-  float kneeAngle = fabs(currentShinRoll - baselineThighRoll);
+  Serial.println("Calibration complete. Medical 0° established.");
 
-  // Constrain the knee angle to 0°..140°
-  kneeAngle = constrain(kneeAngle, 0, 140);
+  // Initialize Queues
+  dataQueue = xQueueCreate(10, sizeof(int));
+  alertQueue = xQueueCreate(5, sizeof(int));
 
-  // Round to the nearest whole degree.
-  int displayAngle = round(kneeAngle);
+  // Launch Tasks on specific cores
+  xTaskCreatePinnedToCore(TaskSensors, "Sensors", 4096, NULL, 3, NULL, 1);
+  xTaskCreatePinnedToCore(TaskSafetyAlert, "Safety", 2048, NULL, 2, NULL, 1);
+  xTaskCreatePinnedToCore(TaskCommunication, "Comm", 4096, NULL, 1, NULL, 0);
+}
 
-  // Create JSON payload.
-  String payload = "{ \"knee_flexion_angle\": " + String(displayAngle) + " }";
-
-  // Publish to MQTT.
-  client.publish(topic, payload.c_str());
-  Serial.print("Published Knee Flexion Angle: ");
-  Serial.print(displayAngle);
-  Serial.println("°");
-
-  // Short delay for fast updates.
-  delay(10);
+void loop() {
+  // Standard loop is not used in RTOS structure
+  vTaskDelete(NULL); 
 }
