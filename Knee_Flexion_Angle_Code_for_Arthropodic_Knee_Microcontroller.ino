@@ -4,6 +4,7 @@
 #include <utility/imumaths.h>
 #include <WiFi.h>
 #include <PubSubClient.h>
+#include <LittleFS.h> // Added for internal flash memory
 
 // ================== Credentials & Config ==================
 const char* ssid          = "MyHotspot";
@@ -15,8 +16,7 @@ const char* mqtt_password = "NodeRedUdemyCourse#123";
 const char* topic         = "knee_flexion_data";
 
 const int ONBOARD_LED      = 2;   // Built-in LED for Safety Alert
-const int DANGER_THRESHOLD  = 120;  // Medical Flexion > 120° triggers alert， 
-//prevents user from doing tasks that bends the knee too much, such as tying shoe lace or squatting.
+const int DANGER_THRESHOLD  = 120;  // Medical Flexion > 120° triggers alert
 
 // ================== Objects & RTOS Handles ==================
 WiFiClient espClient;
@@ -24,32 +24,22 @@ PubSubClient client(espClient);
 Adafruit_BNO055 bnoThigh = Adafruit_BNO055(55, 0x28);
 Adafruit_BNO055 bnoShin  = Adafruit_BNO055(56, 0x29);
 
-QueueHandle_t dataQueue;     // To Communication Task
-QueueHandle_t alertQueue;    // To Safety Task
-float angleOffset = 0.0;     // Stores the "Zero" point
+QueueHandle_t dataQueue;     
+QueueHandle_t alertQueue;    
+float angleOffset = 0.0;
 
 // ================== Task 1: Medical Sensor Logic (Core 1) ==================
 void TaskSensors(void *pvParameters) {
   for (;;) {
-    // Read Euler angles (Roll/Y-axis)
     imu::Vector<3> t = bnoThigh.getVector(Adafruit_BNO055::VECTOR_EULER);
     imu::Vector<3> s = bnoShin.getVector(Adafruit_BNO055::VECTOR_EULER);
 
-    // MEDICAL CALCULATION:
-    // 1. Calculate the raw relative difference
     float currentDiff = t.y() - s.y();
-    
-    // 2. Subtract the standing offset to force 0° at extension
     float medicalFlexion = fabs(currentDiff - angleOffset);
-
-    // 3. Handle 360-degree orientation wrap-around
     if (medicalFlexion > 180) medicalFlexion = 360 - medicalFlexion;
-
-    // 4. Constrain to human physiological limits (0 to 140 degrees)
     medicalFlexion = constrain(medicalFlexion, 0, 140);
     int finalAngle = round(medicalFlexion);
 
-    // Send copies to both queues
     xQueueSend(dataQueue, &finalAngle, 0);
     xQueueSend(alertQueue, &finalAngle, 0);
 
@@ -63,10 +53,8 @@ void TaskSafetyAlert(void *pvParameters) {
   int currentAngle = 0;
 
   for (;;) {
-    // Wait for a new reading from the sensors
     if (xQueueReceive(alertQueue, &currentAngle, portMAX_DELAY)) {
       if (currentAngle >= DANGER_THRESHOLD) {
-        // Medical danger: Rapid Blink
         digitalWrite(ONBOARD_LED, HIGH);
         vTaskDelay(pdMS_TO_TICKS(100));
         digitalWrite(ONBOARD_LED, LOW);
@@ -78,27 +66,65 @@ void TaskSafetyAlert(void *pvParameters) {
   }
 }
 
-// ================== Task 3: MQTT / IoT Gateway (Core 0) ==================
+// ================== Task 3: MQTT / LittleFS Gateway (Core 0) ==================
 void TaskCommunication(void *pvParameters) {
-  for (;;) {
-    // Handle WiFi/MQTT connectivity in the background
-    if (WiFi.status() != WL_CONNECTED) {
-        WiFi.begin(ssid, password);
-        vTaskDelay(pdMS_TO_TICKS(2000));
-    } else if (!client.connected()) {
-        client.connect("ESP32KneeMedicalClient", mqtt_user, mqtt_password);
-    }
+  unsigned long lastReconnectAttempt = 0;
 
-    int angleToSend;
-    // Check for data to publish
-    if (xQueueReceive(dataQueue, &angleToSend, 0) == pdPASS) {
-        if (client.connected()) {
-            String payload = "{ \"knee_flexion_angle\": " + String(angleToSend) + " }";
-            client.publish(topic, payload.c_str());
+  for (;;) {
+    bool isConnected = (WiFi.status() == WL_CONNECTED && client.connected());
+
+    // 1. Non-Blocking Reconnect Logic
+    if (!isConnected) {
+        if (millis() - lastReconnectAttempt > 5000) {
+            lastReconnectAttempt = millis();
+            if (WiFi.status() != WL_CONNECTED) {
+                WiFi.begin(ssid, password);
+            } else {
+                client.connect("ESP32KneeMedicalClient", mqtt_user, mqtt_password);
+            }
+        }
+    } else {
+        // 2. We ARE connected. Recover offline data from LittleFS first!
+        File file = LittleFS.open("/offline.txt", FILE_READ);
+        if (file && file.size() > 0) {
+            Serial.println("Uploading offline backlog...");
+            while (file.available()) {
+                String line = file.readStringUntil('\n');
+                line.trim();
+                if (line.length() > 0) {
+                    // Reconstruct the JSON only at transmission to save flash space
+                    String payload = "{ \"knee_flexion_angle\": " + line + " }";
+                    client.publish(topic, payload.c_str());
+                    client.loop();
+                    vTaskDelay(pdMS_TO_TICKS(5)); // Prevents flooding the MQTT broker
+                }
+            }
+            file.close();
+            LittleFS.remove("/offline.txt"); // Clear the file after successful upload
+            Serial.println("Backlog cleared.");
+        } else if (file) {
+            file.close();
         }
     }
-    client.loop();
-    vTaskDelay(pdMS_TO_TICKS(10)); // Yield to system
+
+    // 3. Empty the live queue (use 'while' to completely drain it every tick)
+    int angleToSend;
+    while (xQueueReceive(dataQueue, &angleToSend, 0) == pdPASS) {
+        if (isConnected) {
+            String payload = "{ \"knee_flexion_angle\": " + String(angleToSend) + " }";
+            client.publish(topic, payload.c_str());
+        } else {
+            // Offline: Append raw integer to internal flash
+            File file = LittleFS.open("/offline.txt", FILE_APPEND);
+            if (file) {
+                file.println(angleToSend);
+                file.close();
+            }
+        }
+    }
+
+    if (isConnected) client.loop();
+    vTaskDelay(pdMS_TO_TICKS(10)); // Yield to system watchdog
   }
 }
 
@@ -112,12 +138,16 @@ void setup() {
     while (1);
   }
 
+  // Initialize Internal Flash
+  if (!LittleFS.begin(true)) {
+    Serial.println("Critical Error: LittleFS Mount Failed!");
+    while (1);
+  }
+
   // MEDICAL ZEROING:
-  // Ask user to stand with a perfectly straight leg (0° Extension)
   Serial.println("MEDICAL CALIBRATION: Stand perfectly straight...");
   delay(4000); 
   
-  // Capture the difference between sensors in a neutral state
   imu::Vector<3> t_start = bnoThigh.getVector(Adafruit_BNO055::VECTOR_EULER);
   imu::Vector<3> s_start = bnoShin.getVector(Adafruit_BNO055::VECTOR_EULER);
   angleOffset = t_start.y() - s_start.y();
@@ -131,10 +161,9 @@ void setup() {
   // Launch Tasks on specific cores
   xTaskCreatePinnedToCore(TaskSensors, "Sensors", 4096, NULL, 3, NULL, 1);
   xTaskCreatePinnedToCore(TaskSafetyAlert, "Safety", 2048, NULL, 2, NULL, 1);
-  xTaskCreatePinnedToCore(TaskCommunication, "Comm", 4096, NULL, 1, NULL, 0);
+  xTaskCreatePinnedToCore(TaskCommunication, "Comm", 8192, NULL, 1, NULL, 0); // Increased stack size for File IO
 }
 
 void loop() {
-  // Standard loop is not used in RTOS structure
   vTaskDelete(NULL); 
 }
